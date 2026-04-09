@@ -331,6 +331,8 @@ def _nlp_verify():
     for model_id, info in all_status.items():
         status = info["status"].value
         print(f"  {model_id}: {status}")
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "python -m mempalace.mcp_server"

@@ -87,6 +87,7 @@ jobs:
 
   benchmark-speed:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -95,12 +96,14 @@ jobs:
       - name: Install base dependencies
         run: pip install -e ".[dev]"
       - name: Speed benchmark WITHOUT NLP providers (baseline)
+        timeout-minutes: 10
         run: python -m pytest tests/benchmarks/ -v -m "benchmark and not stress" --bench-scale small
       - name: Install NLP dependencies
         run: pip install -e ".[nlp-full]"
       - name: Download spaCy model
         run: python -m spacy download xx_ent_wiki_sm
       - name: Speed benchmark WITH NLP providers
+        timeout-minutes: 10
         env:
           MEMPALACE_NLP_SENTENCES: "1"
           MEMPALACE_NLP_NEGATION: "1"

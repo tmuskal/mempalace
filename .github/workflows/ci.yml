@@ -42,12 +42,6 @@ jobs:
 
   test-nlp:
     runs-on: ubuntu-latest
-    env:
-      MEMPALACE_NLP_SENTENCES: "1"
-      MEMPALACE_NLP_NEGATION: "1"
-      MEMPALACE_NLP_NER: "1"
-      MEMPALACE_NLP_CLASSIFY: "1"
-      MEMPALACE_NLP_TRIPLES: "1"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -55,8 +49,18 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev,nlp-full]"
       - run: python -m spacy download xx_ent_wiki_sm
-      - run: python -m pytest tests/ -v --ignore=tests/benchmarks -m "not benchmark and not stress" --cov=mempalace --cov-report=term-missing
-      - run: python -m pytest tests/test_nlp_integration.py -v -m "nlp"
+      - name: Run base test suite (NLP packages installed but flags off)
+        run: python -m pytest tests/ -v --ignore=tests/benchmarks -m "not benchmark and not stress" --cov=mempalace --cov-report=term-missing
+      - name: Run NLP feature flag tests with flags enabled
+        env:
+          MEMPALACE_NLP_SENTENCES: "1"
+          MEMPALACE_NLP_NEGATION: "1"
+          MEMPALACE_NLP_NER: "1"
+          MEMPALACE_NLP_CLASSIFY: "1"
+          MEMPALACE_NLP_TRIPLES: "1"
+        run: python -m pytest tests/test_nlp_feature_flags.py tests/test_nlp_e2e.py -v
+      - name: Run NLP integration tests with real providers
+        run: python -m pytest tests/test_nlp_integration.py -v -m "nlp"
         continue-on-error: true
 
   benchmark:

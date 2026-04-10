@@ -175,15 +175,12 @@ class GLiNERProvider:
     def _triples_from_entity_pairs(self, text: str, entities: list) -> List[Dict]:
         """Build triples from entity pairs by extracting inter-entity text as predicate.
 
-        For each pair of entities appearing in the same sentence, the text
-        between them (cleaned of leading/trailing punctuation) becomes the predicate.
+        Pairs entities that are close together (no sentence boundary between them)
+        and uses the text between them as the predicate.
         """
         import re
 
-        # Split text into sentences
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-
-        # Map each entity to its sentence index
+        # Filter and sort entities by position
         entity_positions = []
         for ent in entities:
             score = ent.get("score", 0)
@@ -191,27 +188,16 @@ class GLiNERProvider:
                 continue
             start = ent.get("start", 0)
             ent_text = ent.get("text", "")
-            label = ent.get("label", "UNKNOWN")
-            # Find which sentence this entity belongs to
-            char_offset = 0
-            sent_idx = 0
-            for i, sent in enumerate(sentences):
-                if char_offset <= start < char_offset + len(sent) + 1:
-                    sent_idx = i
-                    break
-                char_offset += len(sent) + 1  # +1 for the split whitespace
             entity_positions.append(
                 {
                     "text": ent_text,
-                    "label": label,
+                    "label": ent.get("label", "UNKNOWN"),
                     "start": start,
                     "end": ent.get("end", start + len(ent_text)),
                     "score": score,
-                    "sentence": sent_idx,
                 }
             )
 
-        # Sort by position
         entity_positions.sort(key=lambda e: e["start"])
 
         results = []
@@ -220,13 +206,15 @@ class GLiNERProvider:
                 e1 = entity_positions[i]
                 e2 = entity_positions[j]
 
-                # Only pair entities in the same sentence
-                if e1["sentence"] != e2["sentence"]:
-                    continue
-
                 # Extract text between the two entities as the predicate
                 between = text[e1["end"] : e2["start"]].strip()
-                # Clean up punctuation and whitespace
+
+                # Skip if a sentence boundary (. ! ?) sits between them,
+                # but tolerate abbreviation dots (e.g. "Dr.", "U.S.")
+                if re.search(r"(?<![A-Z])[.!?](\s|$)", between):
+                    continue
+
+                # Clean up leading/trailing punctuation
                 between = re.sub(r"^[,;:\s]+|[,;:\s]+$", "", between)
 
                 if not between or len(between) < 2:

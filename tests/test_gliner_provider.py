@@ -300,7 +300,7 @@ class TestGLiNERErrorHandling:
             p._ensure_loaded()
         assert p._available is True
         mock_gliner.GLiNER.from_pretrained.assert_called_once_with(
-            "/fake/model/path", load_onnx_model=True
+            "/fake/model/path", load_onnx_model=True, onnx_model_file="onnx/model.onnx"
         )
 
     def test_fallback_load_exception(self, monkeypatch):

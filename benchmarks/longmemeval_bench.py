@@ -2963,14 +2963,13 @@ def _nlp_is_assistant_reference(registry, question):
 
 def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=50):
     """
-    NLP-enriched mode: uses mempalace NLP providers for entity extraction,
-    temporal detection (via dateparser), and intent classification.
+    NLP-enriched mode: uses mempalace NLP providers for entity extraction
+    and temporal detection for conservative post-retrieval re-ranking.
 
     Strategy:
-    1. extract_candidates() for NLP entity detection → enrich indexed text
-    2. Entity-based overlap scoring for re-ranking
-    3. NLP date entities + dateparser → temporal boosting
-    4. NLP classify_text → assistant-reference detection
+    1. Index raw text (unmodified) into ChromaDB for clean embeddings
+    2. Extract entities from query for lightweight overlap re-ranking
+    3. NLP date entities + dateparser → conservative temporal boosting
     """
     from datetime import datetime
 
@@ -2978,13 +2977,6 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
     from mempalace.nlp_providers.registry import get_registry
 
     registry = get_registry()
-
-    def enrich_text(text):
-        """Append NLP-detected entity names for better embedding signal."""
-        entities = extract_candidates(text)
-        if entities:
-            return f"{text}\n{' '.join(entities.keys())}"
-        return text
 
     def entity_overlap(query_entities, doc_text):
         """Score overlap using NLP-extracted entities."""
@@ -3010,20 +3002,15 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
     query_entities = list(extract_candidates(question).keys())
 
     corpus_user = []
-    corpus_enriched = []
-    corpus_full = []
     corpus_ids = []
     corpus_timestamps = []
 
     for session, sess_id, date in zip(sessions, session_ids, dates):
         if granularity == "session":
             user_turns = [t["content"] for t in session if t["role"] == "user"]
-            all_turns = [t["content"] for t in session]
             if user_turns:
                 raw = "\n".join(user_turns)
                 corpus_user.append(raw)
-                corpus_enriched.append(enrich_text(raw))
-                corpus_full.append("\n".join(all_turns))
                 corpus_ids.append(sess_id)
                 corpus_timestamps.append(date)
         else:
@@ -3032,8 +3019,6 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
                 if turn["role"] == "user":
                     raw = turn["content"]
                     corpus_user.append(raw)
-                    corpus_enriched.append(enrich_text(raw))
-                    corpus_full.append(raw)
                     corpus_ids.append(f"{sess_id}_turn_{turn_num}")
                     corpus_timestamps.append(date)
                     turn_num += 1
@@ -3041,49 +3026,11 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
     if not corpus_user:
         return [], corpus_user, corpus_ids, corpus_timestamps
 
-    # Two-pass for assistant-reference questions (NLP-classified)
-    if _nlp_is_assistant_reference(registry, question):
-        collection = _fresh_collection()
-        collection.add(
-            documents=corpus_enriched,
-            ids=[f"doc_{i}" for i in range(len(corpus_enriched))],
-            metadatas=[
-                {"corpus_id": cid, "timestamp": ts}
-                for cid, ts in zip(corpus_ids, corpus_timestamps)
-            ],
-        )
-        results = collection.query(
-            query_texts=[question],
-            n_results=min(5, len(corpus_enriched)),
-            include=["distances", "metadatas"],
-        )
-        top_indices = [int(rid.split("_")[1]) for rid in results["ids"][0]]
-
-        top_corpus_full = [enrich_text(corpus_full[i]) for i in top_indices]
-        top_ids = [corpus_ids[i] for i in top_indices]
-        top_ts = [corpus_timestamps[i] for i in top_indices]
-
-        collection2 = _fresh_collection("mempal_drawers_pass2")
-        collection2.add(
-            documents=top_corpus_full,
-            ids=[f"doc2_{i}" for i in range(len(top_corpus_full))],
-            metadatas=[{"corpus_id": cid, "timestamp": ts} for cid, ts in zip(top_ids, top_ts)],
-        )
-        results2 = collection2.query(
-            query_texts=[question],
-            n_results=min(n_results, len(top_corpus_full)),
-            include=["distances", "metadatas"],
-        )
-        two_pass_order = [top_indices[int(rid.split("_")[1])] for rid in results2["ids"][0]]
-        seen = set(two_pass_order)
-        ranked_indices = two_pass_order + [i for i in range(len(corpus_user)) if i not in seen]
-        return ranked_indices, corpus_user, corpus_ids, corpus_timestamps
-
-    # Standard retrieval with NLP-enriched text
+    # Index raw text — do NOT enrich/modify documents for embedding
     collection = _fresh_collection()
     collection.add(
-        documents=corpus_enriched,
-        ids=[f"doc_{i}" for i in range(len(corpus_enriched))],
+        documents=corpus_user,
+        ids=[f"doc_{i}" for i in range(len(corpus_user))],
         metadatas=[
             {"corpus_id": cid, "timestamp": ts} for cid, ts in zip(corpus_ids, corpus_timestamps)
         ],
@@ -3091,34 +3038,35 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
 
     results = collection.query(
         query_texts=[question],
-        n_results=min(n_results, len(corpus_enriched)),
+        n_results=min(n_results, len(corpus_user)),
         include=["distances", "metadatas", "documents"],
     )
 
     result_ids = results["ids"][0]
     distances = results["distances"][0]
     documents = results["documents"][0]
-    doc_id_to_idx = {f"doc_{i}": i for i in range(len(corpus_enriched))}
+    doc_id_to_idx = {f"doc_{i}": i for i in range(len(corpus_user))}
 
     # NLP temporal detection via dateparser
     target_date, tolerance = _nlp_detect_temporal_offset(registry, question, question_date)
 
-    hybrid_weight = 0.30
+    # Conservative re-ranking: entity overlap + temporal boost as tie-breakers
+    hybrid_weight = 0.10
     scored = []
     for rid, dist, doc in zip(result_ids, distances, documents):
         idx = doc_id_to_idx[rid]
         overlap = entity_overlap(query_entities, doc)
         fused_dist = dist * (1.0 - hybrid_weight * overlap)
 
-        # Temporal boost from NLP-detected date entities
+        # Conservative temporal boost
         if target_date and tolerance:
             sess_date = parse_question_date(corpus_timestamps[idx])
             if sess_date:
                 delta_days = abs((sess_date - target_date).days)
                 if delta_days <= tolerance:
-                    temporal_boost = 0.40
+                    temporal_boost = 0.15
                 elif delta_days <= tolerance * 3:
-                    temporal_boost = 0.40 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
+                    temporal_boost = 0.15 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
                 else:
                     temporal_boost = 0.0
                 fused_dist = fused_dist * (1.0 - temporal_boost)
@@ -3137,15 +3085,14 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
 
 
 def build_palace_and_retrieve_nlp_hybrid(
-    entry, granularity="session", n_results=50, hybrid_weight=0.30
+    entry, granularity="session", n_results=50, hybrid_weight=0.10
 ):
     """
     NLP-enhanced hybrid mode: uses mempalace NLP providers for entity
-    extraction, temporal detection, and intent classification.
+    extraction and temporal detection for conservative re-ranking.
 
     1. extract_candidates() for NLP entity extraction (query + doc matching)
-    2. NLP registry for date entity detection → temporal boosting
-    3. NLP registry for intent classification → assistant-reference detection
+    2. NLP registry for date entity detection → conservative temporal boosting
     """
     from datetime import datetime
 
@@ -3178,17 +3125,14 @@ def build_palace_and_retrieve_nlp_hybrid(
     query_entities = list(extract_candidates(question).keys())
 
     corpus_user = []
-    corpus_full = []
     corpus_ids = []
     corpus_timestamps = []
 
     for session, sess_id, date in zip(sessions, session_ids, dates):
         if granularity == "session":
             user_turns = [t["content"] for t in session if t["role"] == "user"]
-            all_turns = [t["content"] for t in session]
             if user_turns:
                 corpus_user.append("\n".join(user_turns))
-                corpus_full.append("\n".join(all_turns))
                 corpus_ids.append(sess_id)
                 corpus_timestamps.append(date)
         else:
@@ -3196,51 +3140,12 @@ def build_palace_and_retrieve_nlp_hybrid(
             for turn in session:
                 if turn["role"] == "user":
                     corpus_user.append(turn["content"])
-                    corpus_full.append(turn["content"])
                     corpus_ids.append(f"{sess_id}_turn_{turn_num}")
                     corpus_timestamps.append(date)
                     turn_num += 1
 
     if not corpus_user:
         return [], corpus_user, corpus_ids, corpus_timestamps
-
-    # Two-pass for assistant-reference questions (NLP-classified)
-    if _nlp_is_assistant_reference(registry, question):
-        collection = _fresh_collection()
-        collection.add(
-            documents=corpus_user,
-            ids=[f"doc_{i}" for i in range(len(corpus_user))],
-            metadatas=[
-                {"corpus_id": cid, "timestamp": ts}
-                for cid, ts in zip(corpus_ids, corpus_timestamps)
-            ],
-        )
-        results = collection.query(
-            query_texts=[question],
-            n_results=min(5, len(corpus_user)),
-            include=["distances", "metadatas"],
-        )
-        top_indices = [int(rid.split("_")[1]) for rid in results["ids"][0]]
-
-        top_corpus_full = [corpus_full[i] for i in top_indices]
-        top_ids = [corpus_ids[i] for i in top_indices]
-        top_ts = [corpus_timestamps[i] for i in top_indices]
-
-        collection2 = _fresh_collection("mempal_drawers_pass2")
-        collection2.add(
-            documents=top_corpus_full,
-            ids=[f"doc2_{i}" for i in range(len(top_corpus_full))],
-            metadatas=[{"corpus_id": cid, "timestamp": ts} for cid, ts in zip(top_ids, top_ts)],
-        )
-        results2 = collection2.query(
-            query_texts=[question],
-            n_results=min(n_results, len(top_corpus_full)),
-            include=["distances", "metadatas"],
-        )
-        two_pass_order = [top_indices[int(rid.split("_")[1])] for rid in results2["ids"][0]]
-        seen = set(two_pass_order)
-        ranked_indices = two_pass_order + [i for i in range(len(corpus_user)) if i not in seen]
-        return ranked_indices, corpus_user, corpus_ids, corpus_timestamps
 
     # Standard hybrid retrieval with NLP entity boosting + temporal
     collection = _fresh_collection()
@@ -3272,15 +3177,15 @@ def build_palace_and_retrieve_nlp_hybrid(
         overlap = entity_overlap(query_entities, doc)
         fused_dist = dist * (1.0 - hybrid_weight * overlap)
 
-        # Temporal boost from NLP-detected date entities
+        # Conservative temporal boost
         if target_date and tolerance:
             sess_date = parse_question_date(corpus_timestamps[idx])
             if sess_date:
                 delta_days = abs((sess_date - target_date).days)
                 if delta_days <= tolerance:
-                    temporal_boost = 0.40
+                    temporal_boost = 0.15
                 elif delta_days <= tolerance * 3:
-                    temporal_boost = 0.40 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
+                    temporal_boost = 0.15 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
                 else:
                     temporal_boost = 0.0
                 fused_dist = fused_dist * (1.0 - temporal_boost)
@@ -3445,7 +3350,7 @@ def run_benchmark(
             )
         elif mode == "nlp_hybrid":
             rankings, corpus, corpus_ids, corpus_timestamps = build_palace_and_retrieve_nlp_hybrid(
-                entry, granularity=granularity, hybrid_weight=hybrid_weight
+                entry, granularity=granularity
             )
         elif mode == "aaak":
             rankings, corpus, corpus_ids, corpus_timestamps = build_palace_and_retrieve_aaak(

@@ -23,6 +23,33 @@ MEMORY_TYPE_LABELS = ["decision", "preference", "milestone", "problem", "emotion
 CONFIDENCE_THRESHOLD = 0.5
 
 
+# GLiNER ONNX model token limit — texts longer than this get chunked
+_MAX_CHARS = 1200  # ~384 tokens ≈ 1200 chars with headroom
+
+
+def _chunk_text(text: str, max_chars: int = _MAX_CHARS) -> List[str]:
+    """Split text into chunks that fit within GLiNER's token window.
+
+    Splits on sentence boundaries to avoid cutting entities in half.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    import re
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks = []
+    current = ""
+    for sent in sentences:
+        if current and len(current) + len(sent) + 1 > max_chars:
+            chunks.append(current)
+            current = sent
+        else:
+            current = f"{current} {sent}".strip() if current else sent
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class GLiNERProvider:
     """NLP provider using GLiNER2 for NER, triple extraction, and classification."""
 
@@ -107,25 +134,29 @@ class GLiNERProvider:
     def extract_entities(self, text: str) -> List[Dict]:
         """Extract named entities using GLiNER zero-shot NER.
 
+        Long texts are chunked to stay within the model's token window.
         Returns list of dicts with text, label, start, end keys.
         """
         self._ensure_loaded()
         if not self._available or self._model is None:
             return []
         try:
-            raw = self._model.predict_entities(text, DEFAULT_ENTITY_TYPES)
             results = []
-            for ent in raw:
-                score = ent.get("score", 0)
-                if score >= CONFIDENCE_THRESHOLD:
-                    results.append(
-                        {
-                            "text": ent.get("text", ""),
-                            "label": ent.get("label", "UNKNOWN"),
-                            "start": ent.get("start", 0),
-                            "end": ent.get("end", 0),
-                        }
-                    )
+            offset = 0
+            for chunk in _chunk_text(text):
+                raw = self._model.predict_entities(chunk, DEFAULT_ENTITY_TYPES)
+                for ent in raw:
+                    score = ent.get("score", 0)
+                    if score >= CONFIDENCE_THRESHOLD:
+                        results.append(
+                            {
+                                "text": ent.get("text", ""),
+                                "label": ent.get("label", "UNKNOWN"),
+                                "start": ent.get("start", 0) + offset,
+                                "end": ent.get("end", 0) + offset,
+                            }
+                        )
+                offset += len(chunk) + 1  # +1 for the split whitespace
             return results
         except Exception as e:
             logger.warning(f"GLiNER NER failed: {e}")
@@ -136,13 +167,24 @@ class GLiNERProvider:
 
         Uses GLiNER NER to find entities, then extracts the text between
         co-occurring entity pairs within the same sentence as the predicate.
-        Falls back to predict_relations() if the model supports it.
+        Long texts are chunked to stay within the model's token window.
 
         Returns list of dicts with subject, predicate, object, confidence keys.
         """
         self._ensure_loaded()
         if not self._available or self._model is None:
             return []
+
+        chunks = _chunk_text(text)
+        if len(chunks) > 1:
+            all_triples = []
+            for chunk in chunks:
+                all_triples.extend(self._extract_triples_single(chunk))
+            return all_triples
+        return self._extract_triples_single(text)
+
+    def _extract_triples_single(self, text: str) -> List[Dict]:
+        """Extract triples from a single chunk of text."""
         try:
             entities = self._model.predict_entities(text, DEFAULT_ENTITY_TYPES)
             if not entities:
@@ -242,15 +284,17 @@ class GLiNERProvider:
             return None
         try:
             use_labels = labels if labels else MEMORY_TYPE_LABELS
+            # Use first chunk only for classification
+            chunk = _chunk_text(text)[0]
             if hasattr(self._model, "predict_classification"):
-                result = self._model.predict_classification(text, use_labels)
+                result = self._model.predict_classification(chunk, use_labels)
                 if result:
                     label = result.get("label", "")
                     confidence = result.get("score", result.get("confidence", 0))
                     if confidence >= CONFIDENCE_THRESHOLD:
                         return {"label": label, "confidence": confidence}
             # Fallback: use entity prediction to approximate classification
-            entities = self._model.predict_entities(text, use_labels)
+            entities = self._model.predict_entities(chunk, use_labels)
             if entities:
                 best = max(entities, key=lambda e: e.get("score", 0))
                 score = best.get("score", 0)

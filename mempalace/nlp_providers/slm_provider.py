@@ -14,27 +14,36 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Prompt templates for different tasks
-SENTIMENT_PROMPT = """Analyze the sentiment of the following text and respond with exactly one word: positive, negative, or neutral.
+# Prompt bodies (chat-template wrapping is applied at runtime based on model type)
+SENTIMENT_BODY = (
+    "Analyze the sentiment of the following text. "
+    "Respond with exactly one word: positive, negative, or neutral.\n\n"
+    "Text: {text}"
+)
 
-Text: {text}
+TRIPLES_BODY = (
+    "Extract subject-predicate-object triples from the following text. "
+    'Return ONLY a JSON array of objects with "subject", "predicate", "object" keys. '
+    "No explanation.\n\n"
+    "Text: {text}"
+)
 
-Sentiment:"""
+COREF_BODY = (
+    "Resolve pronoun references in the following text. "
+    'Return ONLY a JSON array of objects with "pronoun" and "referent" keys. '
+    "No explanation.\n\n"
+    "Text: {text}"
+)
 
-TRIPLES_PROMPT = """Extract subject-predicate-object triples from the following text.
-Return a JSON array of objects with "subject", "predicate", "object" keys.
-If no triples can be extracted, return an empty array [].
 
-Text: {text}
-
-Triples:"""
-
-COREF_PROMPT = """Resolve pronoun references in the following text.
-Return a JSON array of objects with "pronoun" and "referent" keys.
-If no pronouns need resolution, return an empty array [].
-
-Text: {text}
-
-Coreferences:"""
+def _chat_wrap(user_msg: str, model_type: str = "phi3") -> str:
+    """Wrap a user message in the appropriate chat template."""
+    if "gemma" in model_type:
+        return (
+            f"<start_of_turn>user\n{user_msg}<end_of_turn>\n<start_of_turn>model\n"
+        )
+    # Phi-3 / Phi-3.5 chat template
+    return f"<|user|>\n{user_msg}<|end|>\n<|assistant|>\n"
 
 
 class SLMProvider:
@@ -47,6 +56,40 @@ class SLMProvider:
         self._load_lock = threading.Lock()
         self._loaded = False
         self._available = None
+        self._model_type = "phi3"
+
+    @staticmethod
+    def _find_genai_dir(model_path):
+        """Find the directory containing genai_config.json, searching subdirectories."""
+        from pathlib import Path
+
+        root = Path(model_path)
+        if (root / "genai_config.json").exists():
+            return root
+        # Search for genai_config.json in subdirectories (e.g. cpu_and_mobile/...)
+        for config in root.rglob("genai_config.json"):
+            return config.parent
+        return root
+
+    @staticmethod
+    def _detect_model_type(model_dir):
+        """Detect the model type from genai_config.json."""
+        from pathlib import Path
+
+        config_path = Path(model_dir) / "genai_config.json"
+        if config_path.exists():
+            try:
+                data = json.loads(config_path.read_text())
+                model_type = data.get("model", {}).get("type", "")
+                if "gemma" in model_type:
+                    return "gemma"
+                if "phi" in model_type:
+                    return "phi3"
+                if "qwen" in model_type:
+                    return "qwen"
+            except Exception:
+                pass
+        return "phi3"
 
     @property
     def name(self) -> str:
@@ -74,11 +117,13 @@ class SLMProvider:
                 model_path = mm.ensure_model("gemma-3-1b-onnx")
 
                 if model_path is None:
-                    logger.debug("Gemma model not available via ModelManager")
+                    logger.debug("SLM model not available via ModelManager")
                     self._available = False
                 else:
-                    self._model = og.Model(str(model_path))
+                    load_path = self._find_genai_dir(model_path)
+                    self._model = og.Model(str(load_path))
                     self._tokenizer = og.Tokenizer(self._model)
+                    self._model_type = self._detect_model_type(load_path)
                     self._available = True
             except ImportError:
                 logger.debug("onnxruntime_genai not installed — SLMProvider unavailable")
@@ -114,20 +159,39 @@ class SLMProvider:
         try:
             tokens = self._tokenizer.encode(prompt)
             params = self._og.GeneratorParams(self._model)
-            params.set_search_options(max_length=max_tokens)
-            params.input_ids = tokens
-            output_tokens = self._model.generate(params)
-            return self._tokenizer.decode(output_tokens[0])
+            params.set_search_options(
+                max_length=len(tokens) + max_tokens,
+                repetition_penalty=1.2,
+            )
+
+            generator = self._og.Generator(self._model, params)
+            generator.append_tokens(tokens)
+
+            output_tokens = []
+            while not generator.is_done():
+                generator.generate_next_token()
+                new_token = generator.get_next_tokens()[0]
+                output_tokens.append(new_token)
+                if len(output_tokens) >= max_tokens:
+                    break
+
+            import numpy as np
+
+            return self._tokenizer.decode(np.array(output_tokens))
         except Exception as e:
             logger.warning(f"SLM generation failed: {e}")
             return ""
+
+    def _format_prompt(self, body: str, **kwargs) -> str:
+        """Format a prompt body with chat template wrapping."""
+        return _chat_wrap(body.format(**kwargs), self._model_type)
 
     def analyze_sentiment(self, text: str) -> str:
         """Analyze sentiment using prompted generation."""
         self._ensure_loaded()
         if not self._available:
             return "neutral"
-        prompt = SENTIMENT_PROMPT.format(text=text)
+        prompt = self._format_prompt(SENTIMENT_BODY, text=text)
         result = self.generate(prompt, max_tokens=10)
         result = result.strip().lower()
         if "positive" in result:
@@ -141,7 +205,7 @@ class SLMProvider:
         self._ensure_loaded()
         if not self._available:
             return []
-        prompt = TRIPLES_PROMPT.format(text=text)
+        prompt = self._format_prompt(TRIPLES_BODY, text=text)
         result = self.generate(prompt, max_tokens=512)
         return self._parse_json_list(result, ["subject", "predicate", "object"])
 
@@ -150,7 +214,7 @@ class SLMProvider:
         self._ensure_loaded()
         if not self._available:
             return []
-        prompt = COREF_PROMPT.format(text=text)
+        prompt = self._format_prompt(COREF_BODY, text=text)
         result = self.generate(prompt, max_tokens=256)
         return self._parse_json_list(result, ["pronoun", "referent"])
 

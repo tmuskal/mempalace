@@ -200,35 +200,35 @@ class GLiNERProvider:
 
         entity_positions.sort(key=lambda e: e["start"])
 
+        # Only pair adjacent entities to avoid long, noisy predicates
         results = []
-        for i in range(len(entity_positions)):
-            for j in range(i + 1, len(entity_positions)):
-                e1 = entity_positions[i]
-                e2 = entity_positions[j]
+        for i in range(len(entity_positions) - 1):
+            e1 = entity_positions[i]
+            e2 = entity_positions[i + 1]
 
-                # Extract text between the two entities as the predicate
-                between = text[e1["end"] : e2["start"]].strip()
+            # Extract text between the two entities as the predicate
+            between = text[e1["end"] : e2["start"]].strip()
 
-                # Skip if a sentence boundary (. ! ?) sits between them,
-                # but tolerate abbreviation dots (e.g. "Dr.", "U.S.")
-                if re.search(r"(?<![A-Z])[.!?](\s|$)", between):
-                    continue
+            # Skip if a sentence boundary (. ! ?) sits between them,
+            # but tolerate abbreviation dots (e.g. "Dr.", "U.S.")
+            if re.search(r"(?<![A-Z])[.!?](\s|$)", between):
+                continue
 
-                # Clean up leading/trailing punctuation
-                between = re.sub(r"^[,;:\s]+|[,;:\s]+$", "", between)
+            # Clean up leading/trailing punctuation
+            between = re.sub(r"^[,;:\s]+|[,;:\s]+$", "", between)
 
-                if not between or len(between) < 2:
-                    continue
+            if not between or len(between) < 2:
+                continue
 
-                confidence = min(e1["score"], e2["score"])
-                results.append(
-                    {
-                        "subject": e1["text"],
-                        "predicate": between,
-                        "object": e2["text"],
-                        "confidence": round(confidence, 3),
-                    }
-                )
+            confidence = min(e1["score"], e2["score"])
+            results.append(
+                {
+                    "subject": e1["text"],
+                    "predicate": between,
+                    "object": e2["text"],
+                    "confidence": round(confidence, 3),
+                }
+            )
 
         return results
 

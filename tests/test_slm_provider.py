@@ -205,12 +205,31 @@ class TestSLMGenerate:
 
 class TestSLMJsonParsing:
     def test_parses_valid_json(self):
-        result = SLMProvider._parse_json_list('Some text [{"a": 1, "b": 2}] more text', ["a", "b"])
+        result = SLMProvider._parse_json_list(
+            'Some text [{"a": "x", "b": "y"}] more text', ["a", "b"]
+        )
         assert len(result) == 1
-        assert result[0] == {"a": 1, "b": 2}
+        assert result[0] == {"a": "x", "b": "y"}
 
     def test_filters_missing_keys(self):
-        result = SLMProvider._parse_json_list('[{"a": 1}, {"a": 1, "b": 2}]', ["a", "b"])
+        result = SLMProvider._parse_json_list(
+            '[{"a": "x"}, {"a": "x", "b": "y"}]', ["a", "b"]
+        )
+        assert len(result) == 1
+
+    def test_recovers_truncated_json(self):
+        result = SLMProvider._parse_json_list(
+            '[{"subject": "Alice", "predicate": "works at", "object": "Google"}, {"subject": "broken',
+            ["subject", "predicate", "object"],
+        )
+        assert len(result) == 1
+        assert result[0]["subject"] == "Alice"
+
+    def test_recovers_from_malformed_array(self):
+        result = SLMProvider._parse_json_list(
+            '```json\n[{"subject": "A", "predicate": "b", "object": "C"}, {"bad": null}]\n```',
+            ["subject", "predicate", "object"],
+        )
         assert len(result) == 1
 
     def test_returns_empty_for_no_array(self):

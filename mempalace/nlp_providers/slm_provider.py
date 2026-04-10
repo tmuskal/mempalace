@@ -22,10 +22,11 @@ SENTIMENT_BODY = (
 )
 
 TRIPLES_BODY = (
-    "Extract subject-predicate-object triples from the following text. "
-    'Return ONLY a JSON array of objects with "subject", "predicate", "object" keys. '
-    "No explanation.\n\n"
-    "Text: {text}"
+    "Extract facts as subject-predicate-object triples from this text. "
+    "Each subject and object must be a single entity. "
+    "Reply with ONLY a JSON array, no explanation.\n\n"
+    "Text: {text}\n\n"
+    "JSON:"
 )
 
 COREF_BODY = (
@@ -230,20 +231,46 @@ class SLMProvider:
 
     @staticmethod
     def _parse_json_list(text: str, required_keys: list) -> List[Dict]:
-        """Parse a JSON array from generated text, validating required keys."""
-        try:
-            # Find JSON array in the output
-            start = text.find("[")
-            end = text.rfind("]")
-            if start == -1 or end == -1:
-                return []
-            data = json.loads(text[start : end + 1])
-            if not isinstance(data, list):
-                return []
+        """Parse a JSON array from generated text, validating required keys.
+
+        Tries full array parse first, falls back to extracting individual
+        JSON objects when the array is malformed or truncated.
+        """
+        import re
+
+        start = text.find("[")
+        if start == -1:
+            start = 0
+        end = text.rfind("]")
+        fragment = text[start : end + 1] if end > start else text[start:]
+
+        def _validate(items):
             return [
                 item
-                for item in data
-                if isinstance(item, dict) and all(k in item for k in required_keys)
+                for item in items
+                if isinstance(item, dict)
+                and all(k in item and isinstance(item[k], str) for k in required_keys)
             ]
+
+        # Try full array parse
+        try:
+            data = json.loads(fragment)
+            if isinstance(data, list):
+                result = _validate(data)
+                if result:
+                    return result
         except (json.JSONDecodeError, ValueError):
-            return []
+            pass
+
+        # Fallback: extract individual {...} objects one at a time
+        results = []
+        for match in re.finditer(r"\{[^{}]+\}", text):
+            try:
+                obj = json.loads(match.group())
+                if isinstance(obj, dict) and all(
+                    k in obj and isinstance(obj[k], str) for k in required_keys
+                ):
+                    results.append(obj)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return results

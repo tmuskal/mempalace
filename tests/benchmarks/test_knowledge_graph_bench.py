@@ -294,7 +294,7 @@ class TestKGStats:
 class TestTripleExtractionProviders:
     """Compare triple extraction quality and speed across NLP providers.
 
-    Tests no-NLP (regex/heuristic), GLiNER2, and SLM (Gemma) approaches
+    Tests no-NLP (regex/heuristic), GLiNER2, and SLM (Phi-3.5 Mini) approaches
     on the same input texts.
     """
 
@@ -338,7 +338,7 @@ class TestTripleExtractionProviders:
         )
 
     def test_slm_triple_extraction(self):
-        """SLM (Gemma) triple extraction quality and speed."""
+        """SLM (Phi-3.5 Mini) triple extraction quality and speed."""
         results = []
         total_triples = 0
         start = time.perf_counter()

@@ -36,8 +36,9 @@ class ModelSpec:
     size_mb: int  # approximate download size
     required_packages: list  # pip packages that must be importable
     description: str = ""
-    optional: bool = False  # True for Phase 4 (Gemma)
+    optional: bool = False  # True for Phase 4 (SLM)
     hf_repo_id: str = ""  # HuggingFace repo for snapshot_download
+    hf_allow_patterns: list = None  # Optional file patterns to download
 
 
 # -- Model catalog --
@@ -74,15 +75,16 @@ MODEL_CATALOG: Dict[str, ModelSpec] = {
         required_packages=["wtpsplit"],
         description="Sentence segmentation, 85 languages",
     ),
-    "gemma-3-1b-onnx": ModelSpec(
-        id="gemma-3-1b-onnx",
-        display_name="Gemma 3 1B ONNX",
+    "phi-3.5-mini-onnx": ModelSpec(
+        id="phi-3.5-mini-onnx",
+        display_name="Phi-3.5 Mini ONNX",
         phase=4,
-        size_mb=1100,
+        size_mb=2700,
         required_packages=["onnxruntime_genai"],
-        description="Small language model for complex extraction",
+        description="Small language model for complex extraction (CPU int4)",
         optional=True,
-        hf_repo_id="MiCkSoftware/gemma-3-1b-it-abliterated-onnx-genai-int4-20260213-221858",
+        hf_repo_id="microsoft/Phi-3.5-mini-instruct-onnx",
+        hf_allow_patterns=["cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/*"],
     ),
 }
 
@@ -309,10 +311,13 @@ class ModelManager:
             from huggingface_hub import snapshot_download
 
             logger.info(f"Downloading {spec.display_name} from {spec.hf_repo_id}...")
-            snapshot_path = snapshot_download(
-                repo_id=spec.hf_repo_id,
-                local_dir=str(model_path),
-            )
+            kwargs = {
+                "repo_id": spec.hf_repo_id,
+                "local_dir": str(model_path),
+            }
+            if spec.hf_allow_patterns:
+                kwargs["allow_patterns"] = spec.hf_allow_patterns
+            snapshot_path = snapshot_download(**kwargs)
             lock_file.unlink(missing_ok=True)
             logger.info(f"Downloaded {spec.display_name} to {snapshot_path}")
             return model_path

@@ -1,5 +1,5 @@
 """
-slm_provider.py -- Small Language Model (Gemma 3 1B) provider via onnxruntime-genai.
+slm_provider.py -- Small Language Model (Phi-3.5 Mini) provider via onnxruntime-genai.
 
 Feature-gated: only active when MEMPALACE_NLP_SLM=1.
 Model is lazily loaded on first use. Thread-safe model loading with lock.
@@ -46,7 +46,7 @@ def _chat_wrap(user_msg: str, model_type: str = "phi3") -> str:
 
 
 class SLMProvider:
-    """NLP provider using Gemma 3 1B ONNX for nuanced NLP tasks."""
+    """NLP provider using Phi-3.5 Mini ONNX for nuanced NLP tasks."""
 
     def __init__(self):
         self._model = None
@@ -113,10 +113,10 @@ class SLMProvider:
                 from .model_manager import ModelManager
 
                 mm = ModelManager.get()
-                model_path = mm.ensure_model("gemma-3-1b-onnx")
+                model_path = mm.ensure_model("phi-3.5-mini-onnx")
 
                 if model_path is None:
-                    logger.debug("SLM model not available via ModelManager")
+                    logger.debug("Phi-3.5 model not available via ModelManager")
                     self._available = False
                 else:
                     load_path = self._find_genai_dir(model_path)

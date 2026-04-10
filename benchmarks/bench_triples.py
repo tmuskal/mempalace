@@ -6,7 +6,7 @@ Triple Extraction Quality Benchmark
 Compares triple extraction quality across three approaches:
 1. Legacy (no NLP) — entity co-occurrence heuristic via extract_candidates()
 2. GLiNER2 — zero-shot NER + relation extraction
-3. SLM (Gemma 3 1B) — prompted triple extraction
+3. SLM (Phi-3.5 Mini) — prompted triple extraction
 
 Each approach is evaluated against hand-labeled ground truth triples
 on conversational/knowledge-management text similar to what MemPalace
@@ -172,7 +172,7 @@ def _extract_gliner(text):
 
 
 def _extract_slm(text):
-    """SLM (Gemma) triple extraction."""
+    """SLM (Phi-3.5 Mini) triple extraction."""
     from mempalace.nlp_providers.registry import get_registry
 
     registry = get_registry()
@@ -269,7 +269,7 @@ def main():
     providers = {
         "legacy": ("Legacy (co-occurrence)", _extract_legacy),
         "gliner": ("GLiNER2 (zero-shot)", _extract_gliner),
-        "slm": ("SLM / Gemma 3 1B (prompted)", _extract_slm),
+        "slm": ("SLM / Phi-3.5 Mini (prompted)", _extract_slm),
     }
 
     if args.provider == "all":

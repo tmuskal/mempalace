@@ -3,44 +3,53 @@
 NLP Provider Quality Benchmark (LongMemEval)
 =============================================
 
-Evaluates how NLP providers affect retrieval quality on the LongMemEval dataset.
-Uses the same evaluation framework as longmemeval_bench.py to produce directly
-comparable Recall@k and NDCG@k scores.
+Evaluates how NLP providers affect retrieval quality on the LongMemEval
+benchmark dataset (https://github.com/xiaowu0162/longmemeval).
 
-NLP-enhanced modes (added to longmemeval_bench.py):
-    nlp_aaak    — AAAK dialect compression with NLP sentence splitting + NER
-    nlp_hybrid  — Hybrid retrieval with NLP entity extraction for keyword boosting
+Downloads longmemeval_s_cleaned.json (~40 sessions per question, 500 questions)
+from HuggingFace and runs retrieval evaluation producing Recall@k and NDCG@k
+scores — the same metrics as longmemeval_bench.py.
 
-This script is a convenience wrapper that:
-1. Runs baseline mode (raw or aaak) without NLP flags
-2. Runs NLP-enhanced mode (nlp_aaak or nlp_hybrid) with current NLP flags
-3. Prints a comparison table
+Modes:
+    raw        — baseline: raw text into ChromaDB
+    aaak       — AAAK dialect compression before ingestion
+    nlp_aaak   — NLP-enhanced AAAK (NLP sentence splitting + NER + compression)
+    nlp_hybrid — NLP-enhanced hybrid (NLP entity extraction for keyword boosting)
 
 Usage:
-    # Full comparison (requires longmemeval dataset):
+    # Run NLP-enhanced vs baseline comparison (auto-downloads dataset):
     MEMPALACE_NLP_SENTENCES=1 MEMPALACE_NLP_NER=1 \\
-      python benchmarks/with-nlp-provider/bench_nlp_providers.py data/longmemeval_s_cleaned.json
+      python benchmarks/with-nlp-provider/bench_nlp_providers.py
 
-    # Quick comparison (5 questions):
-    MEMPALACE_NLP_SENTENCES=1 MEMPALACE_NLP_NER=1 \\
-      python benchmarks/with-nlp-provider/bench_nlp_providers.py data/longmemeval_s_cleaned.json --limit 5
+    # Quick run (10 questions):
+    python benchmarks/with-nlp-provider/bench_nlp_providers.py --limit 10
 
-    # Run directly via longmemeval_bench.py:
-    python benchmarks/longmemeval_bench.py data/longmemeval_s_cleaned.json --mode nlp_aaak
-    python benchmarks/longmemeval_bench.py data/longmemeval_s_cleaned.json --mode nlp_hybrid
+    # Single mode:
+    python benchmarks/with-nlp-provider/bench_nlp_providers.py --mode nlp_aaak
 
-    # Run without dataset (smoke test):
+    # Use existing dataset file:
+    python benchmarks/with-nlp-provider/bench_nlp_providers.py --data data/longmemeval_s_cleaned.json
+
+    # Smoke test (no dataset download, just validates NLP pipeline):
     python benchmarks/with-nlp-provider/bench_nlp_providers.py --self-test
 """
 
 import argparse
+import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+DATASET_URL = (
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned"
+    "/resolve/main/longmemeval_s_cleaned.json"
+)
+DATASET_CACHE = Path(__file__).parent / "longmemeval_s_cleaned.json"
 
 
 def _has_package(name):
@@ -56,6 +65,23 @@ def _nlp_status():
     for key in ["SENTENCES", "NEGATION", "NER", "CLASSIFY", "TRIPLES"]:
         flags[key] = os.environ.get(f"MEMPALACE_NLP_{key}", "0") == "1"
     return flags
+
+
+def download_dataset(dest=None):
+    """Download longmemeval_s_cleaned.json from HuggingFace if not cached."""
+    dest = Path(dest) if dest else DATASET_CACHE
+    if dest.exists():
+        print(f"  Dataset cached: {dest}")
+        return str(dest)
+
+    print("  Downloading LongMemEval dataset...")
+    print(f"  URL: {DATASET_URL}")
+    print(f"  Destination: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(DATASET_URL, str(dest))
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    print(f"  Downloaded: {size_mb:.1f} MB")
+    return str(dest)
 
 
 def print_env():
@@ -77,7 +103,7 @@ def print_env():
 
 
 def run_self_test():
-    """Run self-contained quality checks without the LongMemEval dataset."""
+    """Smoke test: validate NLP pipeline without downloading dataset."""
     from mempalace.dialect import Dialect
     from mempalace.entity_detector import extract_candidates
     from mempalace.general_extractor import extract_memories
@@ -87,56 +113,44 @@ def run_self_test():
         "The migration from MySQL took three weeks but it was worth it.",
         "Alice works at Anthropic in San Francisco. She builds AI systems. "
         "Her colleague Bob moved from Google last year.",
-        "I'm so proud of what we've built together. This has been an amazing journey.",
         "Dr. Smith went to Washington. He met with officials. The meeting lasted 2 hours.",
     ]
-
     d = Dialect()
 
-    print("Sentence Splitting:")
+    print("Smoke test — validating NLP pipeline components:\n")
     for text in texts:
         sents = d._split_sentences(text)
-        print(f"  Input:  {text[:60]}...")
-        print(f"  Splits: {len(sents)} sentences")
-    print()
-
-    print("Entity Extraction:")
-    for text in texts:
-        candidates = extract_candidates(text)
-        print(f"  Input:    {text[:60]}...")
-        print(f"  Entities: {list(candidates.keys())}")
-    print()
-
-    print("Memory Classification:")
-    for text in texts:
+        entities = extract_candidates(text)
         memories = extract_memories(text, min_confidence=0.1)
-        types = [m["memory_type"] for m in memories] if memories else ["(none)"]
-        print(f"  Input: {text[:60]}...")
-        print(f"  Types: {types}")
-    print()
-
-    print("Compression Fidelity:")
-    for text in texts:
         compressed = d.compress(text)
-        stats = d.compression_stats(text, compressed)
-        print(f"  Input:  {text[:60]}...")
-        print(f"  Ratio:  {stats['size_ratio']:.2f}x")
-    print()
+        ratio = d.compression_stats(text, compressed)["size_ratio"]
+        print(f"  Text:        {text[:70]}...")
+        print(f"  Sentences:   {len(sents)}")
+        print(f"  Entities:    {list(entities.keys())}")
+        print(f"  Memories:    {[m['memory_type'] for m in memories] if memories else '(none)'}")
+        print(f"  Compression: {ratio:.1f}x")
+        print()
 
-    print("Self-test complete.")
-    print("For full LongMemEval benchmark, provide a dataset file:")
-    print(
-        "  python benchmarks/with-nlp-provider/bench_nlp_providers.py data/longmemeval_s_cleaned.json"
-    )
+    print("Smoke test passed. For full benchmark run without --self-test.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NLP Provider Quality Benchmark — LongMemEval-based evaluation. "
-        "Compares NLP-enhanced retrieval modes against baselines."
+        description="NLP Provider Quality Benchmark — runs LongMemEval retrieval "
+        "evaluation with and without NLP providers to measure impact on "
+        "Recall@k and NDCG@k."
     )
-    parser.add_argument("data_file", nargs="?", help="Path to longmemeval_s_cleaned.json")
-    parser.add_argument("--limit", type=int, default=0, help="Limit to N questions (0 = all)")
+    parser.add_argument(
+        "--data",
+        default=None,
+        help="Path to longmemeval_s_cleaned.json. Auto-downloaded if not provided.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Limit to N questions (0 = all 500). Use --limit 10 for quick runs.",
+    )
     parser.add_argument(
         "--granularity",
         choices=["session", "turn"],
@@ -144,75 +158,65 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["compare", "nlp_aaak", "nlp_hybrid"],
+        choices=["compare", "raw", "aaak", "nlp_aaak", "nlp_hybrid"],
         default="compare",
-        help="'compare' runs baseline+NLP and prints comparison (default). "
-        "'nlp_aaak' or 'nlp_hybrid' runs a single NLP mode.",
+        help="'compare' runs raw + nlp_aaak + nlp_hybrid and shows all scores. "
+        "Other values run a single mode.",
     )
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Run self-contained quality checks without LongMemEval dataset",
+        help="Smoke test: validate NLP pipeline without downloading dataset.",
     )
     args = parser.parse_args()
 
     print_env()
 
-    if args.self_test or not args.data_file:
-        if not args.data_file:
-            print("No data file provided — running self-test mode.\n")
+    if args.self_test:
         run_self_test()
         return
+
+    # Download or locate dataset
+    data_file = args.data
+    if not data_file:
+        data_file = download_dataset()
+
+    # Verify dataset
+    with open(data_file, encoding="utf-8") as f:
+        data = json.load(f)
+    print(f"Dataset: {data_file}")
+    print(f"Questions: {len(data)}")
+    if args.limit:
+        print(f"Limit: {args.limit}")
+    print()
 
     # Import run_benchmark from longmemeval_bench
     from longmemeval_bench import run_benchmark
 
     if args.mode == "compare":
-        # Run baseline (raw) then NLP-enhanced (nlp_aaak)
-        print("=" * 60)
-        print("  BASELINE: raw mode")
-        print("=" * 60)
-        run_benchmark(
-            args.data_file,
-            granularity=args.granularity,
-            limit=args.limit,
-            mode="raw",
-        )
-
-        print("\n")
-        print("=" * 60)
-        print("  NLP-ENHANCED: nlp_aaak mode")
-        print("=" * 60)
-        run_benchmark(
-            args.data_file,
-            granularity=args.granularity,
-            limit=args.limit,
-            mode="nlp_aaak",
-        )
-
-        print("\n")
-        print("=" * 60)
-        print("  NLP-ENHANCED: nlp_hybrid mode")
-        print("=" * 60)
-        run_benchmark(
-            args.data_file,
-            granularity=args.granularity,
-            limit=args.limit,
-            mode="nlp_hybrid",
-        )
-
-        print("\n" + "=" * 60)
-        print("  Compare scores above to evaluate NLP provider impact.")
-        print("  Higher Recall@k and NDCG@k = better retrieval quality.")
-        print("=" * 60)
+        modes = ["raw", "nlp_aaak", "nlp_hybrid"]
     else:
-        # Run single NLP mode
+        modes = [args.mode]
+
+    for mode in modes:
+        print()
+        print("=" * 60)
+        print(f"  MODE: {mode}")
+        print("=" * 60)
         run_benchmark(
-            args.data_file,
+            data_file,
             granularity=args.granularity,
             limit=args.limit,
-            mode=args.mode,
+            mode=mode,
         )
+
+    if len(modes) > 1:
+        print()
+        print("=" * 60)
+        print("  Compare Recall@k and NDCG@k scores above.")
+        print("  Higher = better retrieval quality.")
+        print("  NLP modes should show improvement over raw baseline.")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

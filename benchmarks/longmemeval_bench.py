@@ -3187,7 +3187,7 @@ def run_benchmark(
     split_subset: "dev" (50 questions for tuning) or "held_out" (450 for final evaluation).
                   None = run all questions.
     """
-    with open(data_file) as f:
+    with open(data_file, encoding="utf-8") as f:
         data = json.load(f)
 
     # Apply train/test split filter before limit/skip

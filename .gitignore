@@ -7,3 +7,4 @@ __pycache__/
 mempal.yaml
 .a5c/
 .coverage
+benchmarks/with-nlp-provider/longmemeval_s_cleaned.json

@@ -212,9 +212,7 @@ class TestSLMJsonParsing:
         assert result[0] == {"a": "x", "b": "y"}
 
     def test_filters_missing_keys(self):
-        result = SLMProvider._parse_json_list(
-            '[{"a": "x"}, {"a": "x", "b": "y"}]', ["a", "b"]
-        )
+        result = SLMProvider._parse_json_list('[{"a": "x"}, {"a": "x", "b": "y"}]', ["a", "b"])
         assert len(result) == 1
 
     def test_recovers_truncated_json(self):

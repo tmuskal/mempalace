@@ -2924,18 +2924,55 @@ def _load_or_create_split(split_file: str, data: list, dev_size: int = 50, seed:
     return split
 
 
+def _nlp_detect_temporal_offset(registry, question, question_date):
+    """Use NLP entity extraction + dateparser to detect temporal references.
+
+    Returns (target_date, tolerance_days) or (None, None).
+    """
+
+    entities = registry.extract_entities(question)
+    date_entities = [e for e in entities if e.get("label", "").lower() == "date"]
+    if not date_entities or not question_date:
+        return None, None
+
+    try:
+        import dateparser
+
+        parsed = dateparser.parse(
+            date_entities[0]["text"],
+            settings={"RELATIVE_BASE": question_date, "PREFER_DATES_FROM": "past"},
+        )
+        if parsed:
+            delta = abs((question_date - parsed).days)
+            tolerance = max(1, delta // 5)
+            return parsed, tolerance
+    except Exception:
+        pass
+    return None, None
+
+
+def _nlp_is_assistant_reference(registry, question):
+    """Use NLP classification to detect assistant-reference intent."""
+    result = registry.classify_text(
+        question, ["asking_about_assistant_response", "general_question"]
+    )
+    if result and result.get("label") == "asking_about_assistant_response":
+        return result.get("confidence", 0) > 0.5
+    return False
+
+
 def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=50):
     """
     NLP-enriched mode: uses mempalace NLP providers for entity extraction,
-    sentence splitting, classification, and temporal detection.
+    temporal detection (via dateparser), and intent classification.
 
     Strategy:
     1. extract_candidates() for NLP entity detection → enrich indexed text
-    2. Entity-based overlap scoring for re-ranking (no stop-word lists)
-    3. NLP registry for date entity detection → temporal boosting
-    4. NLP registry for intent classification → assistant-reference detection
+    2. Entity-based overlap scoring for re-ranking
+    3. NLP date entities + dateparser → temporal boosting
+    4. NLP classify_text → assistant-reference detection
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     from mempalace.entity_detector import extract_candidates
     from mempalace.nlp_providers.registry import get_registry
@@ -2962,43 +2999,6 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
             return datetime.strptime(date_str.split(" (")[0], "%Y/%m/%d")
         except Exception:
             return None
-
-    def detect_temporal_offset(question):
-        """Use NLP date entity extraction to detect temporal references."""
-        entities = registry.extract_entities(question)
-        date_entities = [e for e in entities if e.get("label", "").lower() == "date"]
-        if not date_entities:
-            return None
-        date_text = date_entities[0]["text"].lower()
-        for word, val in [
-            ("yesterday", (1, 1)),
-            ("last week", (7, 3)),
-            ("last month", (30, 7)),
-            ("last year", (365, 30)),
-            ("recently", (14, 14)),
-        ]:
-            if word in date_text:
-                return val
-        import re as _re
-
-        m = _re.search(r"(\d+)\s*(day|week|month|year)", date_text)
-        if m:
-            num = int(m.group(1))
-            unit = m.group(2)
-            multiplier = {"day": 1, "week": 7, "month": 30, "year": 365}
-            days = num * multiplier.get(unit, 1)
-            tolerance = max(2, days // 5)
-            return (days, tolerance)
-        return None
-
-    def is_assistant_reference(question):
-        """Use NLP classification to detect assistant-reference intent."""
-        result = registry.classify_text(
-            question, ["asking_about_assistant_response", "general_question"]
-        )
-        if result and result.get("label") == "asking_about_assistant_response":
-            return result.get("confidence", 0) > 0.5
-        return False
 
     sessions = entry["haystack_sessions"]
     session_ids = entry["haystack_session_ids"]
@@ -3042,7 +3042,7 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
         return [], corpus_user, corpus_ids, corpus_timestamps
 
     # Two-pass for assistant-reference questions (NLP-classified)
-    if is_assistant_reference(question):
+    if _nlp_is_assistant_reference(registry, question):
         collection = _fresh_collection()
         collection.add(
             documents=corpus_enriched,
@@ -3100,12 +3100,8 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
     documents = results["documents"][0]
     doc_id_to_idx = {f"doc_{i}": i for i in range(len(corpus_enriched))}
 
-    # NLP temporal detection
-    time_offset = detect_temporal_offset(question)
-    target_date = None
-    if time_offset and question_date:
-        days_back, tolerance = time_offset
-        target_date = question_date - timedelta(days=days_back)
+    # NLP temporal detection via dateparser
+    target_date, tolerance = _nlp_detect_temporal_offset(registry, question, question_date)
 
     hybrid_weight = 0.30
     scored = []
@@ -3115,15 +3111,14 @@ def build_palace_and_retrieve_nlp_aaak(entry, granularity="session", n_results=5
         fused_dist = dist * (1.0 - hybrid_weight * overlap)
 
         # Temporal boost from NLP-detected date entities
-        if target_date:
+        if target_date and tolerance:
             sess_date = parse_question_date(corpus_timestamps[idx])
             if sess_date:
                 delta_days = abs((sess_date - target_date).days)
-                tol = time_offset[1]
-                if delta_days <= tol:
+                if delta_days <= tolerance:
                     temporal_boost = 0.40
-                elif delta_days <= tol * 3:
-                    temporal_boost = 0.40 * (1.0 - (delta_days - tol) / (tol * 2))
+                elif delta_days <= tolerance * 3:
+                    temporal_boost = 0.40 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
                 else:
                     temporal_boost = 0.0
                 fused_dist = fused_dist * (1.0 - temporal_boost)
@@ -3152,7 +3147,7 @@ def build_palace_and_retrieve_nlp_hybrid(
     2. NLP registry for date entity detection → temporal boosting
     3. NLP registry for intent classification → assistant-reference detection
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     from mempalace.entity_detector import extract_candidates
     from mempalace.nlp_providers.registry import get_registry
@@ -3172,43 +3167,6 @@ def build_palace_and_retrieve_nlp_hybrid(
             return datetime.strptime(date_str.split(" (")[0], "%Y/%m/%d")
         except Exception:
             return None
-
-    def detect_temporal_offset(question):
-        """Use NLP date entity extraction to detect temporal references."""
-        entities = registry.extract_entities(question)
-        date_entities = [e for e in entities if e.get("label", "").lower() == "date"]
-        if not date_entities:
-            return None
-        date_text = date_entities[0]["text"].lower()
-        for word, val in [
-            ("yesterday", (1, 1)),
-            ("last week", (7, 3)),
-            ("last month", (30, 7)),
-            ("last year", (365, 30)),
-            ("recently", (14, 14)),
-        ]:
-            if word in date_text:
-                return val
-        import re as _re
-
-        m = _re.search(r"(\d+)\s*(day|week|month|year)", date_text)
-        if m:
-            num = int(m.group(1))
-            unit = m.group(2)
-            multiplier = {"day": 1, "week": 7, "month": 30, "year": 365}
-            days = num * multiplier.get(unit, 1)
-            tolerance = max(2, days // 5)
-            return (days, tolerance)
-        return None
-
-    def is_assistant_reference(question):
-        """Use NLP classification to detect assistant-reference intent."""
-        result = registry.classify_text(
-            question, ["asking_about_assistant_response", "general_question"]
-        )
-        if result and result.get("label") == "asking_about_assistant_response":
-            return result.get("confidence", 0) > 0.5
-        return False
 
     sessions = entry["haystack_sessions"]
     session_ids = entry["haystack_session_ids"]
@@ -3247,7 +3205,7 @@ def build_palace_and_retrieve_nlp_hybrid(
         return [], corpus_user, corpus_ids, corpus_timestamps
 
     # Two-pass for assistant-reference questions (NLP-classified)
-    if is_assistant_reference(question):
+    if _nlp_is_assistant_reference(registry, question):
         collection = _fresh_collection()
         collection.add(
             documents=corpus_user,
@@ -3305,12 +3263,8 @@ def build_palace_and_retrieve_nlp_hybrid(
     documents = results["documents"][0]
     doc_id_to_idx = {f"doc_{i}": i for i in range(len(corpus_user))}
 
-    # NLP temporal detection
-    time_offset = detect_temporal_offset(question)
-    target_date = None
-    if time_offset and question_date:
-        days_back, tolerance = time_offset
-        target_date = question_date - timedelta(days=days_back)
+    # NLP temporal detection via dateparser
+    target_date, tolerance = _nlp_detect_temporal_offset(registry, question, question_date)
 
     scored = []
     for rid, dist, doc in zip(result_ids, distances, documents):
@@ -3319,15 +3273,14 @@ def build_palace_and_retrieve_nlp_hybrid(
         fused_dist = dist * (1.0 - hybrid_weight * overlap)
 
         # Temporal boost from NLP-detected date entities
-        if target_date:
+        if target_date and tolerance:
             sess_date = parse_question_date(corpus_timestamps[idx])
             if sess_date:
                 delta_days = abs((sess_date - target_date).days)
-                tol = time_offset[1]
-                if delta_days <= tol:
+                if delta_days <= tolerance:
                     temporal_boost = 0.40
-                elif delta_days <= tol * 3:
-                    temporal_boost = 0.40 * (1.0 - (delta_days - tol) / (tol * 2))
+                elif delta_days <= tolerance * 3:
+                    temporal_boost = 0.40 * (1.0 - (delta_days - tolerance) / (tolerance * 2))
                 else:
                     temporal_boost = 0.0
                 fused_dist = fused_dist * (1.0 - temporal_boost)

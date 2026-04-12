@@ -228,8 +228,7 @@ def cmd_repair(args):
     if os.path.exists(backup_path):
         if not contains_palace_database(backup_path):
             print(
-                "  Cannot proceed: backup path exists but does not contain a valid palace backup "
-                "(expected chroma.sqlite3). "
+                "  Cannot proceed: backup path exists but does not contain chroma.sqlite3. "
                 f"Please remove or rename: {backup_path}"
             )
             return

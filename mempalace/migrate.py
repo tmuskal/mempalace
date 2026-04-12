@@ -109,12 +109,14 @@ def contains_palace_database(path: str) -> bool:
     return os.path.isfile(os.path.join(path, "chroma.sqlite3"))
 
 
-def confirm_destructive_action(action: str, palace_path: str, assume_yes: bool = False) -> bool:
+def confirm_destructive_action(
+    operation_name: str, palace_path: str, assume_yes: bool = False
+) -> bool:
     """Require confirmation before destructive palace operations."""
     if assume_yes:
         return True
 
-    print(f"\n  {action} will replace data in: {palace_path}")
+    print(f"\n  {operation_name} will replace data in: {palace_path}")
     print("  A backup will be created first, but the original directory will be deleted.")
     try:
         answer = input("  Continue? [y/N]: ").strip().lower()

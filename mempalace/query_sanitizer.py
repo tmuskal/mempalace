@@ -69,11 +69,11 @@ def sanitize_query(raw_query: str) -> dict:
 
     def _strip_wrapping_quotes(candidate: str) -> str:
         candidate = candidate.strip()
-        while candidate[:1] in {"'", '"'} or candidate[-1:] in {"'", '"'}:
+        while candidate[:1] in {"'", '"'} and candidate[-1:] in {"'", '"'}:
             candidate = candidate.strip("\"'")
             if not candidate:
                 return ""
-        return candidate
+        return candidate.strip("\"'")
 
     def _trim_candidate(candidate: str) -> str:
         candidate = _strip_wrapping_quotes(candidate)

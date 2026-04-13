@@ -16,8 +16,52 @@ No API key. No internet. Everything local.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
+
+
+# ─── Noise stripping ─────────────────────────────────────────────────────
+# Claude Code and other tools inject system tags, hook output, UI chrome,
+# and tool-call JSON into transcripts. These waste drawer space and pollute
+# search results. Strip them before filing.
+
+_NOISE_TAG_PATTERNS = [
+    re.compile(r"<system-reminder[^>]*>.*?</system-reminder>", re.DOTALL),
+    re.compile(r"<command-message[^>]*>.*?</command-message>", re.DOTALL),
+    re.compile(r"<command-name[^>]*>.*?</command-name>", re.DOTALL),
+    re.compile(r"<task-notification[^>]*>.*?</task-notification>", re.DOTALL),
+    re.compile(r"<user-prompt-submit-hook[^>]*>.*?</user-prompt-submit-hook>", re.DOTALL),
+    re.compile(r"<hook_output[^>]*>.*?</hook_output>", re.DOTALL),
+]
+
+_NOISE_STRINGS = [
+    "CURRENT TIME:",
+    "VERIFIED FACTS (do not contradict)",
+    "AGENT SPECIALIZATION:",
+    "Checking verified facts...",
+    "Injecting timestamp...",
+    "Starting background pipeline...",
+    "Checking emotional weights...",
+    "Auto-save reminder...",
+    "Checking pipeline...",
+    "MemPalace auto-save checkpoint.",
+]
+
+
+def strip_noise(text: str) -> str:
+    """Remove system tags, hook output, and Claude Code UI chrome from text."""
+    for pat in _NOISE_TAG_PATTERNS:
+        text = pat.sub("", text)
+    for noise in _NOISE_STRINGS:
+        text = text.replace(noise, "")
+    # Strip Claude Code UI chrome
+    text = re.sub(r".*\(ctrl\+o to expand\).*\n?", "", text)
+    text = re.sub(r"Ran \d+ (?:stop|pre|post)\s*hook.*\n?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"…\s*\+\d+ lines.*\n?", "", text)
+    # Collapse runs of blank lines
+    text = re.sub(r"\n{4,}", "\n\n\n", text)
+    return text.strip()
 
 
 def normalize(filepath: str) -> str:
@@ -40,19 +84,23 @@ def normalize(filepath: str) -> str:
     if not content.strip():
         return content
 
-    # Already has > markers — pass through
+    # Already has > markers — pass through (strip noise but preserve trailing newline)
     lines = content.split("\n")
     if sum(1 for line in lines if line.strip().startswith(">")) >= 3:
-        return content
+        cleaned = strip_noise(content)
+        # Preserve trailing newline if original had one
+        if content.endswith("\n") and not cleaned.endswith("\n"):
+            cleaned += "\n"
+        return cleaned
 
     # Try JSON normalization
     ext = Path(filepath).suffix.lower()
     if ext in (".json", ".jsonl") or content.strip()[:1] in ("{", "["):
         normalized = _try_normalize_json(content)
         if normalized:
-            return normalized
+            return strip_noise(normalized)
 
-    return content
+    return strip_noise(content)
 
 
 def _try_normalize_json(content: str) -> Optional[str]:

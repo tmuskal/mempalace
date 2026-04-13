@@ -35,7 +35,7 @@ from .version import __version__
 import chromadb
 from .query_sanitizer import sanitize_query
 from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
+from .palace_graph import traverse, find_tunnels, graph_stats, create_tunnel, list_tunnels, delete_tunnel, follow_tunnels
 
 from .knowledge_graph import KnowledgeGraph
 
@@ -494,6 +494,63 @@ def tool_graph_stats():
     if not col:
         return _no_palace()
     return graph_stats(col=col)
+
+
+def tool_create_tunnel(
+    source_wing: str,
+    source_room: str,
+    target_wing: str,
+    target_room: str,
+    label: str = "",
+    source_drawer_id: str = None,
+    target_drawer_id: str = None,
+):
+    """Create an explicit cross-wing tunnel between two palace locations.
+
+    Use when you notice content in one project relates to another project.
+    Example: an API design discussion in project_api connects to the
+    database schema in project_database.
+    """
+    try:
+        source_wing = sanitize_name(source_wing, "source_wing")
+        source_room = sanitize_name(source_room, "source_room")
+        target_wing = sanitize_name(target_wing, "target_wing")
+        target_room = sanitize_name(target_room, "target_room")
+    except ValueError as e:
+        return {"error": str(e)}
+    return create_tunnel(
+        source_wing, source_room, target_wing, target_room,
+        label=label,
+        source_drawer_id=source_drawer_id,
+        target_drawer_id=target_drawer_id,
+    )
+
+
+def tool_list_tunnels(wing: str = None):
+    """List all explicit cross-wing tunnels, optionally filtered by wing."""
+    try:
+        wing = _sanitize_optional_name(wing, "wing")
+    except ValueError as e:
+        return {"error": str(e)}
+    return list_tunnels(wing)
+
+
+def tool_delete_tunnel(tunnel_id: str):
+    """Delete an explicit tunnel by its ID."""
+    if not tunnel_id or not isinstance(tunnel_id, str):
+        return {"error": "tunnel_id is required"}
+    return delete_tunnel(tunnel_id)
+
+
+def tool_follow_tunnels(wing: str, room: str):
+    """Follow explicit tunnels from a room to see connected drawers in other wings."""
+    try:
+        wing = sanitize_name(wing, "wing")
+        room = sanitize_name(room, "room")
+    except ValueError as e:
+        return {"error": str(e)}
+    col = _get_collection()
+    return follow_tunnels(wing, room, col=col)
 
 
 # ==================== WRITE TOOLS ====================
@@ -1180,6 +1237,56 @@ TOOLS = {
         "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_graph_stats,
+    },
+    "mempalace_create_tunnel": {
+        "description": "Create a cross-wing tunnel linking two palace locations. Use when content in one project relates to another — e.g., an API design in project_api connects to a database schema in project_database.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_wing": {"type": "string", "description": "Wing of the source"},
+                "source_room": {"type": "string", "description": "Room in the source wing"},
+                "target_wing": {"type": "string", "description": "Wing of the target"},
+                "target_room": {"type": "string", "description": "Room in the target wing"},
+                "label": {"type": "string", "description": "Description of the connection"},
+                "source_drawer_id": {"type": "string", "description": "Optional specific drawer ID"},
+                "target_drawer_id": {"type": "string", "description": "Optional specific drawer ID"},
+            },
+            "required": ["source_wing", "source_room", "target_wing", "target_room"],
+        },
+        "handler": tool_create_tunnel,
+    },
+    "mempalace_list_tunnels": {
+        "description": "List all explicit cross-wing tunnels. Optionally filter by wing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Filter tunnels by wing (shows tunnels where wing is source or target)"},
+            },
+        },
+        "handler": tool_list_tunnels,
+    },
+    "mempalace_delete_tunnel": {
+        "description": "Delete an explicit tunnel by its ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tunnel_id": {"type": "string", "description": "Tunnel ID to delete"},
+            },
+            "required": ["tunnel_id"],
+        },
+        "handler": tool_delete_tunnel,
+    },
+    "mempalace_follow_tunnels": {
+        "description": "Follow tunnels from a room to see what it connects to in other wings. Returns connected rooms with drawer previews.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Wing to start from"},
+                "room": {"type": "string", "description": "Room to follow tunnels from"},
+            },
+            "required": ["wing", "room"],
+        },
+        "handler": tool_follow_tunnels,
     },
     "mempalace_search": {
         "description": "Semantic search. Returns verbatim drawer content with similarity scores. IMPORTANT: 'query' must contain ONLY search keywords. Use 'context' for background. Results with cosine distance > max_distance are filtered out.",

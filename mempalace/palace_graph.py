@@ -15,7 +15,11 @@ Enables queries like:
 No external graph DB needed — built from ChromaDB metadata.
 """
 
+import hashlib
+import json
+import os
 from collections import defaultdict, Counter
+from datetime import datetime
 
 from .config import MempalaceConfig
 from .palace import get_collection as _get_palace_collection
@@ -228,3 +232,161 @@ def _fuzzy_match(query: str, nodes: dict, n: int = 5):
             scored.append((room, 0.5))
     scored.sort(key=lambda x: -x[1])
     return [r for r, _ in scored[:n]]
+
+
+# =============================================================================
+# EXPLICIT TUNNELS — agent-created cross-wing links
+# =============================================================================
+# Passive tunnels are discovered from shared room names across wings.
+# Explicit tunnels are created by agents when they notice a connection
+# between two specific drawers or rooms in different wings/projects.
+#
+# Stored as a JSON file at ~/.mempalace/tunnels.json so they persist
+# across palace rebuilds (not in ChromaDB which can be recreated).
+
+
+_TUNNEL_FILE = os.path.join(os.path.expanduser("~"), ".mempalace", "tunnels.json")
+
+
+def _load_tunnels():
+    """Load explicit tunnels from disk."""
+    if os.path.exists(_TUNNEL_FILE):
+        try:
+            return json.loads(open(_TUNNEL_FILE).read())
+        except Exception:
+            pass
+    return []
+
+
+def _save_tunnels(tunnels):
+    """Save explicit tunnels to disk."""
+    os.makedirs(os.path.dirname(_TUNNEL_FILE), exist_ok=True)
+    with open(_TUNNEL_FILE, "w") as f:
+        json.dump(tunnels, f, indent=2)
+
+
+def create_tunnel(
+    source_wing: str,
+    source_room: str,
+    target_wing: str,
+    target_room: str,
+    label: str = "",
+    source_drawer_id: str = None,
+    target_drawer_id: str = None,
+):
+    """Create an explicit tunnel between two locations in the palace.
+
+    Use when an agent notices a connection between two projects/wings
+    that wouldn't be found by passive room-name matching.
+
+    Args:
+        source_wing: Wing of the source (e.g., "project_api")
+        source_room: Room in the source wing
+        target_wing: Wing of the target (e.g., "project_database")
+        target_room: Room in the target wing
+        label: Description of the connection
+        source_drawer_id: Optional specific drawer ID
+        target_drawer_id: Optional specific drawer ID
+
+    Returns:
+        The created tunnel dict.
+    """
+    tunnel_id = hashlib.sha256(
+        f"{source_wing}/{source_room}↔{target_wing}/{target_room}".encode()
+    ).hexdigest()[:16]
+
+    tunnel = {
+        "id": tunnel_id,
+        "source": {"wing": source_wing, "room": source_room},
+        "target": {"wing": target_wing, "room": target_room},
+        "label": label,
+        "created_at": datetime.now().isoformat(),
+    }
+    if source_drawer_id:
+        tunnel["source"]["drawer_id"] = source_drawer_id
+    if target_drawer_id:
+        tunnel["target"]["drawer_id"] = target_drawer_id
+
+    tunnels = _load_tunnels()
+
+    # Dedup — don't create if same endpoints already linked
+    for existing in tunnels:
+        if existing.get("id") == tunnel_id:
+            existing.update(tunnel)  # update label/drawers
+            _save_tunnels(tunnels)
+            return existing
+
+    tunnels.append(tunnel)
+    _save_tunnels(tunnels)
+    return tunnel
+
+
+def list_tunnels(wing: str = None):
+    """List all explicit tunnels, optionally filtered by wing.
+
+    Returns tunnels where the wing appears as either source or target.
+    """
+    tunnels = _load_tunnels()
+    if wing:
+        tunnels = [
+            t for t in tunnels
+            if t["source"]["wing"] == wing or t["target"]["wing"] == wing
+        ]
+    return tunnels
+
+
+def delete_tunnel(tunnel_id: str):
+    """Delete an explicit tunnel by ID."""
+    tunnels = _load_tunnels()
+    tunnels = [t for t in tunnels if t.get("id") != tunnel_id]
+    _save_tunnels(tunnels)
+    return {"deleted": tunnel_id}
+
+
+def follow_tunnels(wing: str, room: str, col=None, config=None):
+    """Follow explicit tunnels from a room — returns connected drawers.
+
+    Given a location (wing/room), finds all tunnels leading from or to it,
+    and optionally fetches the connected drawer content.
+    """
+    tunnels = _load_tunnels()
+    connections = []
+
+    for t in tunnels:
+        src = t["source"]
+        tgt = t["target"]
+
+        if src["wing"] == wing and src["room"] == room:
+            connections.append({
+                "direction": "outgoing",
+                "connected_wing": tgt["wing"],
+                "connected_room": tgt["room"],
+                "label": t.get("label", ""),
+                "drawer_id": tgt.get("drawer_id"),
+                "tunnel_id": t["id"],
+            })
+        elif tgt["wing"] == wing and tgt["room"] == room:
+            connections.append({
+                "direction": "incoming",
+                "connected_wing": src["wing"],
+                "connected_room": src["room"],
+                "label": t.get("label", ""),
+                "drawer_id": src.get("drawer_id"),
+                "tunnel_id": t["id"],
+            })
+
+    # If we have a collection, fetch drawer content for connected items
+    if col and connections:
+        drawer_ids = [c["drawer_id"] for c in connections if c.get("drawer_id")]
+        if drawer_ids:
+            try:
+                results = col.get(ids=drawer_ids, include=["documents", "metadatas"])
+                drawer_map = dict(zip(results["ids"], results["documents"]))
+                for c in connections:
+                    did = c.get("drawer_id")
+                    if did and did in drawer_map:
+                        c["drawer_preview"] = drawer_map[did][:300]
+            except Exception:
+                pass
+
+    return connections

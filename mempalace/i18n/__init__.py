@@ -15,6 +15,7 @@ and the README section "Adding a new language" for the schema.
 
 import json
 from pathlib import Path
+from typing import Optional
 
 _LANG_DIR = Path(__file__).parent
 _strings: dict = {}
@@ -24,7 +25,7 @@ _current_lang: str = "en"
 _entity_cache: dict = {}
 
 
-def _canonical_lang(lang: str) -> str | None:
+def _canonical_lang(lang: str) -> Optional[str]:
     """Resolve a language code to its on-disk canonical filename stem.
 
     BCP 47 tags are case-insensitive (RFC 5646 §2.1.1), and the locale
